@@ -1,5 +1,6 @@
 .DS_Store
 .env
+.private-words
 __pycache__/
 *.py[cod]
 .pytest_cache/

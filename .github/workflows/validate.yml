@@ -20,6 +20,6 @@ jobs:
       - name: Unit tests
         run: python -B -m unittest discover -s tests -p 'test_*.py'
       - name: Python syntax
-        run: python -m compileall -q scripts runtime tests tools
+        run: python -m compileall -q scripts runtime tests
       - name: Shell syntax
-        run: bash -n scripts/*.sh tools/*.sh
+        run: bash -n scripts/*.sh

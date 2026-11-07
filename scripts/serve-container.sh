@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Container entrypoint: serve Qwen3.8-Flash-Next on one 24 GB GPU. Hot experts run on the GPU; the CPU computes
-# the cold experts during decode, and prefill streams them to the GPU. Usage: qwen38-serve [MODEL_DIR [MTP_DIR]]
+# Container entrypoint: serve Qwen3.8-Flash-Next on one 32 GB Blackwell GPU with 128 GB of RAM. Dense weights and
+# the hot experts run on the GPU; the CPU computes the cold experts from RAM during decode, and prefill streams them
+# to the GPU. Usage: qwen38-serve [MODEL_DIR [MTP_DIR]]
 set -euo pipefail
 
-profile=${QWEN38_PROFILE:-/opt/qwen38-3090/configs/3090-64gb-128k.env}
+profile=${QWEN38_PROFILE:-/opt/qwen38-bw45/configs/bw45-128gb-256k.env}
 [[ -f "$profile" ]] || { echo "missing runtime profile: $profile" >&2; exit 2; }
 # shellcheck source=/dev/null
 source "$profile"
 
 model=${1:-/model}
 mtp_model=${2:-"$model/runtime/mtp-int4-g32"}
-rankings=/opt/qwen38-3090/configs/static_hot_cache_rankings.json
+rankings=/opt/qwen38-bw45/configs/static_hot_cache_rankings.json
 
 [[ -f "$model/model.safetensors.index.json" ]] || { echo "model checkpoint not found at $model" >&2; exit 2; }
 [[ -f "$mtp_model/model.safetensors.index.json" ]] || { echo "MTP draft not found at $mtp_model" >&2; exit 2; }
@@ -19,6 +20,7 @@ rankings=/opt/qwen38-3090/configs/static_hot_cache_rankings.json
 # The CPU decode path takes one request with up to 4 tokens per step (MTP depth <= 3).
 [[ "$MAX_NUM_SEQS" == 1 ]] || { echo "MAX_NUM_SEQS must be 1 on the single-GPU runtime" >&2; exit 2; }
 [[ "$MTP_DEPTH" =~ ^[0-3]$ ]] || { echo "MTP_DEPTH must be 0-3 on the single-GPU runtime" >&2; exit 2; }
+[[ "$QWEN38_PLE_MMAP" =~ ^[01]$ ]] || { echo "QWEN38_PLE_MMAP must be 0 (PLE table in RAM) or 1 (mmap)" >&2; exit 2; }
 if [[ "$KV_CACHE_DTYPE" == int8_per_token_head || "$KV_CACHE_DTYPE" == fp8_per_token_head ]]; then
   (( VLLM_PREFIX_CACHE_RETENTION_INTERVAL % 3200 == 0 )) || {
     echo "VLLM_PREFIX_CACHE_RETENTION_INTERVAL must be a multiple of 3200 with $KV_CACHE_DTYPE" >&2; exit 2; }
@@ -35,21 +37,24 @@ else
   spec_args=()
 fi
 
-# Single-GPU mode (fixed): hot-only expert placement, CPU cold experts, PLE table read from the checkpoint on NVMe.
+# Single-GPU mode (fixed): hot-only expert placement, CPU cold experts, PLE table in a CPU worker process (in RAM
+# with QWEN38_PLE_MMAP=0, read through the page cache with QWEN38_PLE_MMAP=1; set by the profile).
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export QWEN38_CPU_EXPERTS=1 QWEN38_CPU_EXPERTS_MODEL="$model"
-export QWEN38_PLE_MMAP=1 QWEN38_PLE_MMAP_DIR="$model" QWEN38_PLE_PREFAULT=0
+export QWEN38_PLE_MMAP_DIR="$model" QWEN38_PLE_PREFAULT=0
 export QWEN38_STREAM_STAGE=0 QWEN38_STAGE_OVERLAP=0 CPU_OFFLOAD_GB=0
 export VLLM_PLE_CPU_OFFLOAD=1 VLLM_FORCE_DYNAMIC_SPEC_SCHEDULING=1
 export VLLM_WNA16_DYNAMIC_LRU=0 VLLM_WNA16_MIXED_VMM_HOT_CACHE=0 VLLM_WNA16_STATIC_HOT_CACHE_SIZE=0
 export VLLM_WNA16_STATIC_HOT_CACHE_MAX_TOKENS=16 VLLM_WNA16_STATIC_HOT_CACHE_FILE="$rankings"
 
-# Host plan: resolve the "auto" CPU sets and arena size once, so every serving process uses the same values.
+# Host plan: resolve the "auto" CPU sets and arena size once, so every serving process uses the same values. It
+# exits non-zero (with the reason) when the memory limit cannot hold the plan, before the checkpoint is loaded.
 host_py=$(python3 -c 'import importlib.util, os; print(os.path.join(os.path.dirname(importlib.util.find_spec("vllm").origin), "qwen38_host.py"))')
+plan_env=$(python3 "$host_py" --env) || { echo "[qwen38-bw45] the host plan does not fit; see the error above" >&2; exit 2; }
 while IFS='=' read -r key value; do
-  export "$key=$value"
-done < <(python3 "$host_py" --env)
-python3 "$host_py" | sed 's/^/[qwen38-3090] /'
+  if [[ -n "$key" ]]; then export "$key=$value"; fi
+done <<< "$plan_env"
+python3 "$host_py" | sed 's/^/[qwen38-bw45] /'
 
 exec vllm serve "$model" \
   --served-model-name "$SERVED_MODEL_NAME" \

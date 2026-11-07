@@ -4,7 +4,7 @@
 Each request is a code-review prompt of exactly N tokens built from this repository's runtime sources (tokenized
 by the server), then M greedy output tokens. A unique cache_salt keeps the prefix cache out of the measurement.
 
-  python3 scripts/bench.py                                  # 4K+256, 32K+512, 131K+512, 8K+1024
+  python3 scripts/bench.py                                  # 4K+256, 32K+512, 131K+512, 258K+512
   python3 scripts/bench.py --shapes 8192:1024 --out results/8k.json
 
 Prefill tok/s = prompt tokens / time to first token. Decode tok/s = (output tokens - 1) / (total - first token).
@@ -125,7 +125,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base-url", default="http://127.0.0.1:8000")
     ap.add_argument("--model", default="Qwen3.8-Flash-Next")
-    ap.add_argument("--shapes", default="4096:256,32768:512,131072:512,8192:1024",
+    ap.add_argument("--shapes", default="4096:256,32768:512,131072:512,258048:512",
                     help="comma-separated INPUT:OUTPUT token counts, run in order")
     ap.add_argument("--corpus", type=Path, default=ROOT / "runtime" / "vllm-overlay")
     ap.add_argument("--out", type=Path)
@@ -144,7 +144,7 @@ def main() -> None:
               f"{res['prefill_tok_s']:>13,.0f} {res['decode_tok_s']:>12.1f}", flush=True)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps({"host": host_info(), "base_url": base, "results": results}, indent=1) + "\n")
+        args.out.write_text(json.dumps({"host": host_info(), "results": results}, indent=1) + "\n")
         print(f"wrote {args.out}", file=sys.stderr)
 
 

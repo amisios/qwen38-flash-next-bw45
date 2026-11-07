@@ -78,8 +78,8 @@ jobs:
             ${{ steps.meta.outputs.image }}:${{ env.TAG }}
             ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.short }}
           labels: |
-            org.opencontainers.image.title=qwen38-flash-next-3090
-            org.opencontainers.image.description=Qwen3.8-Flash-Next on a single RTX 3090 (24 GB) + 64 GB RAM: vLLM runtime with CPU cold experts (weights not included)
+            org.opencontainers.image.title=qwen38-flash-next-bw45
+            org.opencontainers.image.description=Qwen3.8-Flash-Next on one 32 GB Blackwell GPU + 128 GB RAM: vLLM runtime with RAM-resident CPU cold experts, 256K context (weights not included)
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.url=https://github.com/${{ github.repository }}/releases/tag/${{ env.TAG }}
             org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}

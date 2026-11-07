@@ -1,0 +1,59 @@
+# Qwen3.8-Flash-Next on one 32 GB Blackwell GPU + 128 GB RAM, from the repository root:
+#   cp .env.example .env        # set MODEL_DIR; check COMPOSE_MEMORY_LIMIT
+#   make preflight              # optional: checks GPU, RAM, memory limit, driver
+#   docker compose up -d --build
+# Every setting lives in .env: compose reads it for the values below, and env_file passes it into the container,
+# where it overrides the profile defaults (configs/bw45-128gb-256k.env).
+name: qwen38-bw45
+
+services:
+  qwen38:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ${IMAGE:-qwen38-flash-next-bw45:local}
+    container_name: qwen38-flash-next-bw45
+    env_file: .env
+    environment:
+      PORT: "${PORT:-8000}"
+    ipc: host
+    cap_add:
+      - SYS_PTRACE
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    # The whole serving stack (expert arena, PLE table, processes, page cache) stays inside this limit and the
+    # runtime sizes its expert arena from it. 118g suits a 128 GB machine (MemTotal ~125.6 GiB); the profile needs
+    # ~109 GiB with 64 hot experts. No swap: memswap_limit equals mem_limit.
+    mem_limit: ${COMPOSE_MEMORY_LIMIT:-118g}
+    memswap_limit: ${COMPOSE_MEMORY_LIMIT:-118g}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE:-0}"]
+              capabilities: [gpu]
+    ports:
+      # 0.0.0.0 = reachable from the network. Docker-published ports bypass host firewall rules (ufw, nftables);
+      # set BIND_ADDRESS=127.0.0.1 to keep the API local, and VLLM_API_KEY in .env to require a bearer token.
+      - "${BIND_ADDRESS:-0.0.0.0}:${PORT:-8000}:${PORT:-8000}"
+    volumes:
+      - "${MODEL_DIR:?Set MODEL_DIR in .env}:/model:ro"
+      # Humming and Triton compile kernels on first use; keeping the caches makes later starts faster.
+      - "./jit-cache/humming:/root/.humming"
+      - "./jit-cache/triton:/root/.triton"
+    command: ["/model"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${PORT:-8000}/health > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30m
+    stop_grace_period: 2m
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    restart: unless-stopped
