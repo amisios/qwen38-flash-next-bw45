@@ -1,74 +1,30 @@
-# Qwen3.8-Flash-Next on a single RTX 3090 (24 GB) + 64 GB RAM
+# Qwen3.8-Flash-Next on one 32 GB Blackwell GPU + 128 GB RAM
 
-<h2 align="center">2,100 tok/s prefill · 47 tok/s decode · 128K context</h2>
-<p align="center"><strong>One RTX 3090 24 GB · 64 GB system RAM · vLLM · OpenAI-compatible API · Docker</strong></p>
-<p align="center">One request, best of 2: a 131,099-token prompt reaches the first token in 62 s (2,106 tok/s), then decodes at 47.4 tok/s.</p>
-<p align="center">
-  <a href="https://huggingface.co/albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE"><strong>Download the checkpoint</strong></a> ·
-  <a href="#quick-start">Quick start</a> ·
-  <a href="docs/how-it-works.md">How it works</a> ·
-  <a href="docs/faq.md">FAQ</a> ·
-  <a href="https://github.com/DominikBucko/qwen38-flash-next-2x3090">Two GPUs?</a>
-</p>
+<p align="center"><strong>One 32 GB Blackwell GPU · 128 GB system RAM · 256K context · nothing read from disk while serving · vLLM · OpenAI-compatible API · docker compose</strong></p>
 
-Run **Qwen3.8-Flash-Next locally on one RTX 3090 and 64 GB of RAM**: one of the most common local-AI machines.
-The checkpoint (INT4 experts, FP8 embedding table) is 125 GB, about five times the card's memory. This runtime
-keeps the attention and dense weights plus the 32 busiest experts of every layer on the GPU, and **the CPU
-computes the other experts straight from RAM** during decode. During prefill it streams all experts through the
-GPU, so long prompts stay fast. The full 128K context fits thanks to an INT8 KV cache.
+Run **Qwen3.8-Flash-Next** (a 125 GB mixture-of-experts checkpoint: INT4 experts, FP8 per-layer embedding table)
+on a single 32 GB Blackwell GPU with 128 GB of RAM. Every dense part of the model and the most-used experts
+live in VRAM; all other experts and the 51 GB embedding table are loaded into RAM at startup, and the **CPU
+computes the cold experts straight from RAM** during decode. During prefill the cold experts are streamed through
+the GPU, so long prompts stay fast. The checkpoint is read once at startup and never touched while serving.
 
-It is the same checkpoint and the same vLLM build as the
-[2× RTX 3090 runtime](https://github.com/DominikBucko/qwen38-flash-next-2x3090), repackaged for half the
-hardware. Nothing is pruned or requantized.
-
-## Results
-
-One RTX 3090, the machine limited to **64 GB of RAM** (the server container to 56 GiB), release image, default
-profile, one request at a time, greedy decoding with MTP speculative decoding. Two runs on fresh server starts,
-one with the image built locally and one with the published image pulled by digest:
-
-| Request (input + output tokens) | First token | Prefill | Decode |
-|---|---:|---:|---:|
-| 131,099 + 512 | 62.2 / 90.3 s | **2,106** / 1,451 tok/s | **47.4** / 43.3 tok/s |
-| 32,799 + 512 | 15.3 / 14.8 s | 2,141 / 2,219 tok/s | 50.3 / 49.5 tok/s |
-| 8,218 + 1,024 | 5.2 / 5.7 s | 1,570 / 1,452 tok/s | 49.1 / 48.5 tok/s |
-| 4,127 + 256, first request after start | 3.3 / 3.4 s | 1,258 / 1,231 tok/s | 47.8 / 50.8 tok/s |
-
-![Prefill and decode speed on one RTX 3090 with 64 GB RAM](docs/images/results.svg)
-
-GPU memory peaked at 23.4 GB and no request was preempted. Prefill runs at 2,100–2,200 tok/s when the expert
-reads from NVMe overlap the GPU work; some requests take a slower path, ~1,450 tok/s (the second 131K run and
-both 8K requests above). See the [known issue](benchmarks/2026-09-30/README.md#known-issue-occasional-slow-prefill-steps).
-
-**Decode depends mainly on RAM bandwidth**, because the CPU computes the cold experts. With the server restricted
-to part of the 32-core benchmark CPU:
-
-| CPU cores available | Like | Prefill, 131K prompt | Decode |
-|---|---|---:|---:|
-| 32 (4 CCDs), 2 runs | the benchmark workstation | 1,451–2,106 tok/s | 43–51 tok/s |
-| 16 (2 CCDs), 2 runs | Ryzen 9 7950X / 9950X | 1,452–2,104 tok/s | 39–47 tok/s |
-| 8 (1 CCD), earlier image | Ryzen 7 7800X3D / 9700X | 2,149 tok/s | 34–36 tok/s |
-
-These are proxies on the same Zen 3 cores and DDR4 memory. Desktop Zen 4/5 and Intel CPUs with DDR5 have more
-memory bandwidth per core and may do better. See the [benchmark report](benchmarks/2026-09-30/README.md) and
-[hardware](docs/hardware.md), and please [share your numbers](https://github.com/DominikBucko/qwen38-flash-next-3090/issues/new?template=hardware-report.yml).
-
-With a second RTX 3090, the [2× RTX 3090 runtime](https://github.com/DominikBucko/qwen38-flash-next-2x3090)
-reaches 3,410 tok/s prefill and 84 tok/s decode with the same 64 GB of RAM (its
-[64 GB profile](https://github.com/DominikBucko/qwen38-flash-next-2x3090#new-64-gb-ram-profile), which uses this
-runtime's design on both cards), or up to 4,191 tok/s prefill and 111.5 tok/s decode with 128 GB.
+> **Status:** the profile values are starting points derived from the original single-RTX-3090 runtime and the
+> memory math in [docs/how-it-works.md](docs/how-it-works.md). Tune them once on the real machine
+> ([docs/tuning.md](docs/tuning.md#first-start-tuning)); measured numbers will be added then.
 
 ## What you need
 
-- **GPU:** one NVIDIA card with 24 GB (RTX 3090 tested; 3090 Ti, 4090 and other 24 GB cards should work).
-- **RAM:** 64 GB. With 96 GB or more every expert stays in RAM.
-- **CPU:** x86-64 with AVX2 (any Ryzen, Intel Core since 2013).
-- **Disk:** an NVMe SSD with ~130 GB free: the checkpoint is also read while serving.
-- **Software:** Linux, Docker, the NVIDIA Container Toolkit, NVIDIA driver 580 or newer.
+| Part | Needed |
+|---|---|
+| GPU | One NVIDIA Blackwell card with 32 GB (compute capability 12.0) |
+| RAM | 128 GB: the serving container needs ~109 GiB (experts 50.8 GiB + embedding table 47.8 GiB + processes) |
+| CPU | x86-64 with AVX2, FMA and F16C. Decode speed depends on memory bandwidth: a multi-channel workstation CPU is ideal |
+| Disk | ~130 GB for the checkpoint, read only at startup (NVMe keeps startup short) |
+| Software | Linux, Docker with the compose plugin, NVIDIA Container Toolkit, NVIDIA driver 580 or newer (the image uses CUDA 13.0) |
 
 ## Quick start
 
-Download the checkpoint (about 129 GB) to an NVMe drive. `hf` comes with `pip install -U huggingface_hub`.
+Download the checkpoint (about 129 GB). `hf` comes with `pip install -U huggingface_hub`.
 
 ```bash
 hf download albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE \
@@ -76,95 +32,94 @@ hf download albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE \
   --local-dir /models/qwen38-flash-next
 ```
 
-Build and start the server:
+Configure, build once, then run with compose:
 
 ```bash
-git clone https://github.com/DominikBucko/qwen38-flash-next-3090.git
-cd qwen38-flash-next-3090
-cp .env.example .env    # set MODEL_DIR to the download directory
+cp .env.example .env            # set MODEL_DIR; check COMPOSE_MEMORY_LIMIT (118g for 128 GB)
+./scripts/preflight.sh          # optional: GPU, RAM vs. memory limit, driver, compose (or: make preflight)
 
-make build-image
-make serve
+docker build -f docker/Dockerfile -t qwen38-flash-next-bw45:local .
+docker compose up -d
+docker compose logs -f          # ready when the log shows the API server listening
 ```
 
-`make serve` runs `scripts/preflight.sh` first, which checks the GPU, RAM, CPU, driver and disk. The server is
-ready after about 4 minutes (the first start compiles kernels and takes longer) and listens on
-`http://127.0.0.1:8000/v1`.
-
-To skip the local build, use the published v0.1.0 image (weights stay a separate download):
-
-```bash
-IMAGE=ghcr.io/dominikbucko/qwen38-flash-next-3090@sha256:7f176605b59c462af21b1b62fd854f9f3cca96e3d11a295581297483d45490a3 make serve
-```
-
-Later releases list their digests in the [release notes](https://github.com/DominikBucko/qwen38-flash-next-3090/releases).
-
-Check it and measure your machine:
+The first start compiles GPU kernels (cached in `./jit-cache`) and loads ~100 GiB into RAM, so it takes several
+minutes; later starts are faster. `docker compose ps` reports the container as healthy once `/health` answers.
 
 ```bash
 python3 scripts/smoke_test.py   # a reasoning answer, a tool call, code
-make bench                      # 4K, 32K, 131K and 8K prompts
-```
+make bench                      # 4K, 32K, 131K and 258K prompts
 
-```bash
 curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model": "Qwen3.8-Flash-Next",
   "messages": [{"role": "user", "content": "Explain mixture-of-experts models in three sentences."}]
 }'
 ```
 
-Any OpenAI-compatible client works with the base URL `http://127.0.0.1:8000/v1`. Tool calls, reasoning output
+Any OpenAI-compatible client works with the base URL `http://<server>:8000/v1`. Tool calls, reasoning output
 (`reasoning_content`) and prefix caching are on.
 
-## How it fits
+## Where everything lives
 
-| Where | What |
-|---|---|
-| GPU, 23.4 GB peak | Attention, recurrent and dense weights (9.8 GB), 32 hot experts per layer (3.9 GB), MTP draft, INT8 KV cache for 141,504 tokens (3.05 GB) |
-| RAM, 56 GiB container | 19,480 of the 23,040 cold experts (46 GiB, huge pages), serving processes, page cache |
-| NVMe | The FP8 per-layer embedding table (51 GB) and the 3,560 least-used experts, read in place from the checkpoint |
+The model has no dense-only layers: all 48 layers are mixture-of-experts layers (512 routed experts, 10 per token,
+plus one shared expert). So "dense in VRAM, experts in RAM" means: every non-expert weight on the GPU, plus the
+most frequently routed experts of each layer; the remaining experts in RAM.
 
-- **Decode:** per layer, the GPU runs the hot experts, a pinned CPU thread pool computes the cold ones (AVX2,
-  FP32 accumulation), and the GPU computes about 22% of the cold experts itself over PCIe while it waits. MTP
-  drafts 3 tokens per step. NVMe experts that decode uses move into RAM as it runs.
-- **Prefill:** 8,192-token chunks; each layer's cold experts are copied to the GPU in groups of 80 (~27 GB/s),
+| Where | What | Size |
+|---|---|---:|
+| GPU (32 GB) | Attention, GDN (linear attention), shared experts, router, embeddings, LM head | 9.8 GB |
+| | 64 "hot" experts per layer (the most frequently routed ones) | 7.8 GB |
+| | MTP draft layer (speculative decoding) | 1.6 GB |
+| | INT8 KV cache for ~287K tokens (one 256K request + recurrent-state headroom) | 4.7 GB |
+| | Prefill staging buffers, CUDA graphs, workspaces | ~5 GB |
+| RAM (118 GiB container) | All 21,504 cold experts, pinned, on huge pages | 50.8 GiB |
+| | The FP8 per-layer embedding (PLE) table, in the PLE worker process | 47.8 GiB |
+| | Serving processes, CUDA host buffers | ~7 GiB |
+| Disk | The checkpoint, read at startup only | 116 GiB |
+
+The GPU estimate is about 28 GiB at the start value of 64 hot experts per layer; [tuning](docs/tuning.md) raises
+the hot count until the measured peak leaves ~1 GiB free (likely ~84–88 per layer).
+
+- **Decode:** per layer, the GPU runs the hot experts, a pinned CPU thread pool computes the cold ones from RAM
+  (AVX2, FP32 accumulation), and the GPU computes a share of the cold experts itself over PCIe while it waits.
+  MTP drafts 3 tokens per step.
+- **Prefill:** 8,192-token chunks; each layer's cold experts are copied from RAM to the GPU in groups of 80,
   converted to the GPU kernel layout and computed there, overlapping the next copies.
 
-The runtime picks the CPU cores and the RAM arena size from your machine. Details:
-[how it works](docs/how-it-works.md) · [tuning and troubleshooting](docs/tuning.md).
+Details: [how it works](docs/how-it-works.md) · [tuning and troubleshooting](docs/tuning.md) ·
+[hardware](docs/hardware.md) · [FAQ](docs/faq.md).
 
-## If it runs out of memory
+## Network access
 
-- **GPU:** the profile peaks at 23.4 GB of 24 GB. If the card also drives your desktop, lower
-  `QWEN38_HOT_ONLY` from 32 to 28 in `.env` (~465 MiB less), or shorten the context. See
+`compose.yaml` publishes the API on `${BIND_ADDRESS:-0.0.0.0}:${PORT:-8000}`, i.e. reachable from the network,
+**without authentication** unless you set `VLLM_API_KEY` in `.env`. Ports published by Docker bypass host firewall
+rules (ufw, nftables). Use this only on a trusted network, or set `BIND_ADDRESS=127.0.0.1`.
+
+## If it does not start
+
+- **`RAM-resident plan ... needs X GiB`**: the container memory limit cannot hold every expert and the embedding
+  table. Set the `COMPOSE_MEMORY_LIMIT` the message names in `.env` (the server checks this in seconds, before it
+  loads the checkpoint).
+- **CUDA out of memory**: lower `QWEN38_HOT_ONLY` (each step of 1 frees ~116 MiB), see
   [GPU memory](docs/tuning.md#gpu-memory).
-- **RAM:** the container gets the installed RAM minus 8 GiB (`MEMORY_LIMIT=auto`) and sizes its expert arena to
-  fit. Set `MEMORY_LIMIT=48g` or `HOST_RESERVE_GIB=12` to leave more for other programs; more experts then stay
-  on NVMe.
+- **After changing the GPU or driver**: delete `./jit-cache` once so kernels are recompiled for the new setup.
 
 ## Limitations
 
-- One request at a time (others queue), up to 135,168 tokens each.
-- Tested on one machine: an RTX 3090 with a 32-core Threadripper PRO limited to 64 GB of RAM. Desktop CPUs and
-  other 24 GB GPUs are not tested yet; please [share your results](https://github.com/DominikBucko/qwen38-flash-next-3090/issues/new?template=hardware-report.yml).
-- The first start compiles GPU kernels; the first ~64 decode steps after a new long prompt are slower while the
-  RAM arena adapts.
-- Some prefill requests take a slower path (~5.5 s instead of ~3.7 s per 8,192-token chunk); the cause is still
-  open. See the [benchmark report](benchmarks/2026-09-30/README.md#known-issue-occasional-slow-prefill-steps).
-- The INT8 KV cache is checked with greedy-decoding agreement only (within run-to-run noise of BF16); no
-  likelihood or benchmark-suite comparison yet.
+- One request at a time (others queue), up to 262,144 tokens each.
+- Not yet benchmarked on the target hardware; the sizes above are calculated, the speed is unmeasured.
+- The INT8 KV cache was checked upstream with greedy-decoding agreement only (within run-to-run noise of BF16).
 - Linux only.
 
-## Related
+## Credits
 
-- [qwen38-flash-next-2x3090](https://github.com/DominikBucko/qwen38-flash-next-2x3090): the same model on two
-  RTX 3090s, either with 64 GB of RAM ([64 GB profile](https://github.com/DominikBucko/qwen38-flash-next-2x3090#new-64-gb-ram-profile):
-  3,410 tok/s prefill, 84 tok/s decode, 128K context) or with 128 GB (up to 4,191 tok/s prefill and 111.5 tok/s
-  decode, up to 256K context).
-- [albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE](https://huggingface.co/albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE):
-  the checkpoint (Intel AutoRound W4A16 target, FP8 PLE table, INT4 MTP draft).
+This runtime is derived from [qwen38-flash-next-3090](https://github.com/DominikBucko/qwen38-flash-next-3090)
+(single RTX 3090 + 64 GB) and builds on the release image of
+[qwen38-flash-next-2x3090](https://github.com/DominikBucko/qwen38-flash-next-2x3090) (pinned vLLM build, Humming
+kernels, Qwen3.8 runtime overlay), both Apache-2.0. The checkpoint is
+[albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE](https://huggingface.co/albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE).
 
 ## License
 
-The runtime code is Apache-2.0. The model keeps the upstream Qwen and third-party terms listed in
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+The runtime code is Apache-2.0 ([`LICENSE`](LICENSE)). The model keeps the upstream Qwen and third-party terms
+listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

@@ -22,7 +22,7 @@ body:
     id: settings
     attributes:
       label: Settings
-      description: Variables you changed in `.env`, and the `[qwen38-3090]` lines from the server log.
+      description: Variables you changed in `.env`, and the `[qwen38-bw45]` lines from the server log. Redact hostnames, IPs and paths.
       render: text
   - type: textarea
     id: logs

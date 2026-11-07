@@ -1,12 +1,12 @@
 name: Hardware report / benchmark
-description: Share how it runs on your machine (desktop DDR5/DDR4, other 24 GB GPUs, 48/96/128 GB RAM), or a failed attempt.
+description: Share how it runs on your machine, or a failed attempt.
 title: "[Hardware] GPU / CPU / RAM: result"
 labels: ["hardware-report"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thank you! Every report helps others with the same hardware. Redact private paths and prompts.
+        Thank you! Redact hostnames, IP addresses, private paths and prompts before posting.
   - type: dropdown
     id: outcome
     attributes:
@@ -21,41 +21,41 @@ body:
     id: gpu
     attributes:
       label: GPU
-      placeholder: "RTX 3090 24 GB, PCIe 4.0 x16, also drives the display: yes/no"
+      placeholder: "GPU model and VRAM, PCIe generation and lanes, also drives a display: yes/no"
     validations:
       required: true
   - type: input
     id: cpu
     attributes:
       label: CPU
-      placeholder: "Ryzen 9 7950X"
+      placeholder: "CPU model, cores, number of L3 domains (CCDs)"
     validations:
       required: true
   - type: input
     id: ram
     attributes:
       label: RAM
-      placeholder: "2x32 GB DDR5-6000 CL30, EXPO on"
+      placeholder: "8x16 GB DDR5-4800, all channels populated"
     validations:
       required: true
   - type: textarea
     id: system
     attributes:
       label: System
-      description: OS, kernel, NVIDIA driver, storage for the checkpoint (NVMe model), image tag or commit.
+      description: OS, kernel, NVIDIA driver, docker compose version, image tag or commit, output of `make preflight`.
     validations:
       required: true
   - type: textarea
     id: plan
     attributes:
       label: Startup plan and settings
-      description: The `[qwen38-3090]` lines from the server log, and any variables you changed in `.env`.
+      description: The `[qwen38-bw45]` lines from the server log, the logged `GPU KV cache size`, and any variables you changed in `.env`.
       render: text
   - type: textarea
     id: results
     attributes:
       label: Results
-      description: The `make bench` table or JSON (run it twice if the first start compiled kernels), or the error.
+      description: The `make bench` table or JSON (run it twice if the first start compiled kernels), peak GPU memory, or the error.
       render: text
     validations:
       required: true

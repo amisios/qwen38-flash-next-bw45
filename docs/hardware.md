@@ -1,60 +1,65 @@
-# Hardware: requirements, the benchmark host, and what to expect
+# Hardware: requirements, target machine and host setup
 
 ## Requirements
 
 | Part | Needed | Notes |
 |---|---|---|
-| GPU | One NVIDIA card with 24 GB | RTX 3090 tested. RTX 3090 Ti, RTX 4090, RTX A5000 and other 24 GB cards should work but are untested. 16 GB cards do not fit the default profile. |
-| System RAM | 64 GB | Tested size. 96 GB or more keeps every expert in RAM; 48 GB should start but decode will read more from NVMe (untested). |
-| CPU | x86-64 with AVX2, FMA and F16C | Any Ryzen, or Intel Core from Haswell (2013) on. Decode speed depends on memory bandwidth (see below). |
-| Storage | NVMe SSD, ~130 GB free | The checkpoint is read at runtime (PLE rows, least-used experts). A SATA SSD is slower; a hard disk is not usable. |
-| Software | Linux, Docker, NVIDIA Container Toolkit, NVIDIA driver 580+ | The image uses CUDA 13.0. |
+| GPU | One NVIDIA Blackwell card with 32 GB | Compute capability 12.0 (sm_120), which the image is compiled for. The profile plans for nearly all of the 32 GB. |
+| System RAM | 128 GB | The container needs ~109 GiB with the default profile: all cold experts (50.8 GiB) + PLE table (47.8 GiB) + processes. |
+| CPU | x86-64 with AVX2, FMA and F16C | Decode speed depends on memory bandwidth: populate every memory channel. |
+| Storage | ~130 GB for the checkpoint | Read once at startup; NVMe keeps startup short. Nothing is read while serving. |
+| Software | Linux, Docker with the compose plugin, NVIDIA Container Toolkit, NVIDIA driver 580+ | The image uses CUDA 13.0. |
 
-`make preflight` checks all of this on your machine.
+`./scripts/preflight.sh` (or `make preflight`) checks all of this, including whether `COMPOSE_MEMORY_LIMIT` in
+`.env` can hold the profile.
 
-## Benchmark host
+## Target machine
 
 | Part | Configuration |
 |---|---|
-| GPU | 1× RTX 3090 24 GB, PCIe 4.0 ×16 |
-| CPU | AMD Threadripper PRO 5975WX, 32 cores / 64 threads, 4 CCDs |
-| RAM | 8×16 GB DDR4-3200, limited to **64 GiB** with a memory balloon ([`tools/ram-balloon.sh`](../tools/ram-balloon.sh)); the server container was capped at **56 GiB** |
-| NVMe | Samsung PM981a 1 TB (PCIe 3.0 ×4), also the system disk |
-| Software | Linux 7.0, NVIDIA driver 595.84, Docker |
+| GPU | 1x NVIDIA Blackwell card, 32 GB GDDR7, PCIe 5.0 x16 |
+| CPU | Workstation-class x86-64 CPU, several L3 domains (CCDs), multi-channel memory |
+| RAM | 128 GB; serving container limited to 118 GiB |
+| Storage | NVMe SSD for the checkpoint (startup only) |
+| Software | Debian, NVIDIA driver 595 (CUDA 13 capable), Docker with compose |
 
-The balloon locks the RAM above 64 GiB in a separate process, so the page cache, the expert arena and the
-serving processes compete for 64 GiB exactly as on a 64 GB machine. It was started after the server had
-populated its expert arena, because a freshly booted 64 GB machine hands out unfragmented huge pages.
+## What to expect
 
-## What to expect on a desktop
+- **Prefill** is bound by the GPU and by PCIe: every 8,192-token chunk streams all cold experts (~54 GB with 64 hot
+  experts per layer) from RAM to the GPU, overlapped with the attention work. A PCIe 5.0 x16 slot roughly doubles
+  the streaming bandwidth of PCIe 4.0; check the link with
+  `nvidia-smi --query-gpu=pcie.link.gen.max,pcie.link.gen.current,pcie.link.width.current --format=csv`
+  (the current generation drops at idle, so read it under load).
+- **Decode** is bound by how fast the CPU reads the cold experts from RAM. A multi-channel workstation CPU with all
+  channels populated does best; on CPUs with several CCDs the CPU pool spans all of them automatically. Every hot
+  expert added on the GPU takes work off the CPU.
+- **Startup** reads ~100 GiB from the checkpoint into RAM (expert arena and PLE table) and, on the first start,
+  compiles GPU kernels (cached in `./jit-cache`). Expect several minutes from NVMe.
 
-Prefill is GPU- and PCIe-bound, so it should be similar on any machine with a PCIe 4.0 ×16 slot (PCIe 3.0
-halves the expert streaming bandwidth; expect slower long prompts).
+Measured numbers will be added after the first tuning run ([tuning](tuning.md#first-start-tuning)).
 
-Decode is bound by how fast the CPU reads the cold experts: about 2 GB per decode step. During serving, the
-benchmark host's 24-thread pool reads them at about 60 GB/s (85 GB/s in an isolated test). Its eight DDR4
-channels could deliver far more; what limits it is the link between each CCD and memory. For comparison, the
-theoretical bandwidth of dual-channel DDR5-6000 is 96 GB/s, DDR5-4800 77 GB/s and DDR4-3200 51 GB/s; real
-reads reach a good part of that, depending on the CPU.
+## Host setup notes (Debian)
 
-So a DDR5 desktop should be in the same range as the benchmark host's pool, and a DDR4 desktop clearly lower. The [desktop CPU proxy runs](../benchmarks/2026-09-30/README.md#desktop-cpu-proxies) restrict
-the server to 16 and 8 cores of the benchmark CPU to show how decode scales with fewer cores and less
-bandwidth. They are proxies, not desktop measurements. Please [share your numbers](https://github.com/DominikBucko/qwen38-flash-next-3090/issues/new?template=hardware-report.yml).
+- **NVIDIA Container Toolkit**: install it from NVIDIA's apt repository, then
+  `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker`. It also works with a driver
+  installed from NVIDIA's `.run` installer, as long as the driver libraries are registered with `ldconfig`.
+  `docker info | grep -i nvidia` should list the runtime.
+- **Compose plugin**: `docker compose version` must work (the `docker-compose-plugin` package from Docker's
+  repository).
+- **Transparent huge pages**: `cat /sys/kernel/mm/transparent_hugepage/enabled` should show `[madvise]` or
+  `[always]`. The expert arena asks for huge pages; compacting memory before a start helps after long uptimes:
+  `sync; echo 1 | sudo tee /proc/sys/vm/compact_memory`.
+- **Kernel**: 5.14+ (MADV_POPULATE_WRITE), 6.1+ for huge-page collapse (Debian 12 and 13 qualify).
+- **Firewall**: ports published by Docker bypass ufw/nftables input rules. The default compose file listens on all
+  interfaces without an API key; restrict it with `BIND_ADDRESS=127.0.0.1` or set `VLLM_API_KEY` if the network is
+  not fully trusted.
+- **Other GPU users**: the profile plans for nearly the whole card. Keep the display (if any) and other CUDA
+  programs off this GPU, or lower `QWEN38_HOT_ONLY`.
 
-Tips for desktops:
+## Less RAM or another GPU
 
-- Populate both memory channels (two or four DIMMs) and enable EXPO/XMP.
-- On two-CCD Ryzen parts (7900X, 7950X, 9900X, 9950X), the CPU pool spans both CCDs automatically.
-- Keep other memory-heavy programs closed while generating: they share the same bandwidth.
-- If the 3090 also drives your display, see [GPU memory](tuning.md#gpu-memory).
-
-## More RAM or another GPU
-
-- **96–128 GB RAM, one GPU**: the whole expert set fits in RAM; decode never reads experts from NVMe. The
-  default `auto` settings pick this up.
-- **Two RTX 3090s and 64 GB**: use the [64 GB profile](https://github.com/DominikBucko/qwen38-flash-next-2x3090#new-64-gb-ram-profile)
-  of [qwen38-flash-next-2x3090](https://github.com/DominikBucko/qwen38-flash-next-2x3090). It applies this
-  runtime's design to both cards, each owning half of the experts: 3,410 tok/s prefill and 84 tok/s decode on a
-  131K prompt.
-- **Two RTX 3090s and 128 GB**: the same repository's 128 GB profiles keep all cold-expert work on the GPUs:
-  up to ~4,200 tok/s prefill (prefill profile) and ~110 tok/s decode (agent profile).
+- **Less than ~112 GB of RAM**: set `QWEN38_PLE_MMAP=1` (PLE rows through the page cache, ~48 GiB less container
+  memory). Below that, `QWEN38_REQUIRE_RAM_RESIDENT=0` lets cold experts stay on disk, as long as at most
+  `QWEN38_STREAM_GROUP` of them per layer do (the server checks this at startup); decode then waits for disk reads.
+- **24 GB GPUs**: lower `QWEN38_HOT_ONLY` to ~32 and `MAX_MODEL_LEN`/`KV_CACHE_MEMORY_BYTES` to 131,072 / 3.05 GB;
+  the upstream single-RTX-3090 runtime was tuned for exactly that case.

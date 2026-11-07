@@ -2,9 +2,11 @@
 
 This repository does not contain model weights.
 
-- The runtime overlay is derived from vLLM and from the
-  [qwen38-flash-next-2x3090](https://github.com/DominikBucko/qwen38-flash-next-2x3090) overlay, and is distributed
-  under the Apache License 2.0; see [`LICENSE`](LICENSE).
+- The runtime overlay is derived from vLLM, from the single-GPU
+  [qwen38-flash-next-3090](https://github.com/DominikBucko/qwen38-flash-next-3090) runtime (of which this repository
+  is a modified fork) and from the [qwen38-flash-next-2x3090](https://github.com/DominikBucko/qwen38-flash-next-2x3090)
+  overlay, and is distributed under the Apache License 2.0; see [`LICENSE`](LICENSE). Files changed in this fork are
+  recorded in its git history.
 - The model (Qwen/Qwen3.8-Flash-Next and the assembled checkpoint
   [albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE](https://huggingface.co/albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE)) is
   governed by the Qwen Community License supplied with the upstream checkpoint. Intel's AutoRound checkpoint and
