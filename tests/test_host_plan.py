@@ -1,6 +1,7 @@
 """GPU-free checks for runtime/vllm-overlay/qwen38_host.py on synthetic sysfs, /proc and cgroup trees."""
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import tempfile
@@ -31,8 +32,8 @@ def fake_sys(root: Path, cores: list[tuple[list[int], str]]) -> None:
                 (cache / "shared_cpu_list").write_text((l3 if level == "3" else siblings) + "\n")
 
 
-def threadripper_5975wx() -> list[tuple[list[int], str]]:
-    # 4 CCDs x 8 cores, SMT siblings n and n + 32
+def workstation_32c_4ccd() -> list[tuple[list[int], str]]:
+    # 4 CCDs x 8 cores, SMT siblings n and n + 32 (32-core workstation part)
     return [([c, c + 32], f"{c // 8 * 8}-{c // 8 * 8 + 7},{c // 8 * 8 + 32}-{c // 8 * 8 + 39}") for c in range(32)]
 
 
@@ -63,10 +64,10 @@ class HostPlanTest(unittest.TestCase):
             pool = host.pool_cpus(sys_root=tmp)
             return host.format_cpus(pool), host.format_cpus(host.main_cpus(pool, sys_root=tmp))
 
-    def test_benchmark_host_matches_measured_layout(self):
-        # The layout measured best on the benchmark host: 6 of 8 cores per CCD, serving processes everywhere
-        # except the pool cores' SMT siblings.
-        self.assertEqual(self.plan(threadripper_5975wx()),
+    def test_four_ccd_workstation_layout(self):
+        # The layout measured best on a 32-core, 4-CCD workstation CPU: 6 of 8 cores per CCD, serving processes
+        # everywhere except the pool cores' SMT siblings.
+        self.assertEqual(self.plan(workstation_32c_4ccd()),
                          ("2-7,10-15,18-23,26-31", "0-33,40-41,48-49,56-57"))
 
     def test_two_ccd_desktop(self):
@@ -82,7 +83,7 @@ class HostPlanTest(unittest.TestCase):
         self.assertEqual(main, "0-12,14,16-31")
 
     def test_thread_cap_spreads_over_domains(self):
-        pool, _ = self.plan(threadripper_5975wx(), {"QWEN38_CPU_EXPERTS_MAX_THREADS": "8"})
+        pool, _ = self.plan(workstation_32c_4ccd(), {"QWEN38_CPU_EXPERTS_MAX_THREADS": "8"})
         self.assertEqual(pool, "2-3,10-11,18-19,26-27")
 
     def test_explicit_lists_win(self):
@@ -94,38 +95,58 @@ class HostPlanTest(unittest.TestCase):
         self.assertEqual(self.plan(cores)[0], "1")
 
 
-class MemoryPlanTest(unittest.TestCase):
-    def trees(self, tmp: Path, mem_total_gib: float, limit: str | None):
-        (tmp / "proc").mkdir()
-        (tmp / "proc/meminfo").write_text(f"MemTotal:       {int(mem_total_gib * 2**20)} kB\nMemFree: 1 kB\n")
-        (tmp / "cg").mkdir()
-        if limit is not None:
-            (tmp / "cg/memory.max").write_text(limit + "\n")
-        return str(tmp / "proc"), str(tmp / "cg")
+MMAP = {"QWEN38_PLE_MMAP": "1"}                      # PLE rows through the page cache (not in the arena budget)
+PROFILE = {"QWEN38_HOT_ONLY": "64", "QWEN38_REQUIRE_RAM_RESIDENT": "1", "QWEN38_PLE_MMAP": "0",
+           "QWEN38_STREAM_GROUP": "80"}               # configs/bw45-128gb-256k.env
 
-    def slots(self, mem_total_gib, limit, env=None, total=48 * 480):
+
+class MemoryPlanTest(unittest.TestCase):
+    NAMES = ("QWEN38_EXPERT_ARENA_SLOTS", "QWEN38_HOST_RESERVE_GIB", "QWEN38_SERVE_OVERHEAD_GIB", "QWEN38_PLE_MMAP",
+             "QWEN38_PLE_RESIDENT_GIB", "QWEN38_REQUIRE_RAM_RESIDENT", "QWEN38_STREAM_GROUP", "QWEN38_HOT_ONLY")
+
+    @contextlib.contextmanager
+    def machine(self, mem_total_gib: float, limit: str | None, env=None):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, env or {}, clear=False):
-            for name in ("QWEN38_EXPERT_ARENA_SLOTS", "QWEN38_HOST_RESERVE_GIB", "QWEN38_SERVE_OVERHEAD_GIB"):
+            for name in self.NAMES:
                 if name not in (env or {}):
                     os.environ.pop(name, None)
-            proc, cg = self.trees(Path(tmp), mem_total_gib, limit)
+            root = Path(tmp)
+            (root / "proc").mkdir()
+            (root / "proc/meminfo").write_text(f"MemTotal:       {int(mem_total_gib * 2**20)} kB\nMemFree: 1 kB\n")
+            (root / "cg").mkdir()
+            if limit is not None:
+                (root / "cg/memory.max").write_text(limit + "\n")
+            yield str(root / "proc"), str(root / "cg")
+
+    def slots(self, mem_total_gib, limit, env=None, total=48 * 480):
+        with self.machine(mem_total_gib, limit, env) as (proc, cg):
             return host.arena_slots(total, 48, proc_root=proc, cgroup_root=cg)
 
-    def test_benchmark_limit(self):
-        # 56 GiB container limit -> 46 GiB arena, as in the benchmarks (19,500 slots)
-        self.assertEqual(self.slots(125.7, str(56 * GIB)), 19480)
+    def check(self, mem_total_gib, limit, env, hot):
+        """arena_slots + check_plan as the entrypoint runs them; returns the slot count."""
+        total = 48 * (512 - hot)
+        with self.machine(mem_total_gib, limit, env) as (proc, cg):
+            slots = host.arena_slots(total, 48, proc_root=proc, cgroup_root=cg)
+            host.check_plan(total, slots, 48, proc_root=proc, cgroup_root=cg)
+            return slots
 
-    def test_64gb_desktop_without_limit(self):
+    # Arena sizing with the PLE table memory-mapped (the original 64 GB design)
+
+    def test_mmap_56g_limit(self):
+        # 56 GiB container limit -> 46 GiB arena (19,480 slots)
+        self.assertEqual(self.slots(125.7, str(56 * GIB), MMAP), 19480)
+
+    def test_mmap_64gb_without_limit(self):
         # 62.5 GiB MemTotal -> 64 GiB installed - 8 GiB for the OS = 56 GiB budget -> 46 GiB arena
-        self.assertEqual(self.slots(62.5, "max"), 19480)
-        self.assertEqual(self.slots(64.0, None), 19480)
+        self.assertEqual(self.slots(62.5, "max", MMAP), 19480)
+        self.assertEqual(self.slots(64.0, None, MMAP), 19480)
 
-    def test_48gb_desktop(self):
+    def test_mmap_48gb(self):
         # 46.9 GiB MemTotal -> 48 - 8 = 40 GiB budget -> 30 GiB arena
-        self.assertEqual(self.slots(46.9, None), int(30 * GIB // host.SLOT_BYTES))
+        self.assertEqual(self.slots(46.9, None, MMAP), int(30 * GIB // host.SLOT_BYTES))
 
     def test_large_host_keeps_every_cold_expert(self):
-        self.assertEqual(self.slots(125.7, None), 48 * 480)
+        self.assertEqual(self.slots(125.7, None, MMAP), 48 * 480)
 
     def test_explicit_and_floor(self):
         self.assertEqual(self.slots(62.5, "max", {"QWEN38_EXPERT_ARENA_SLOTS": "12345"}), 12345)
@@ -137,6 +158,44 @@ class MemoryPlanTest(unittest.TestCase):
             cg.mkdir()
             (cg / "memory.limit_in_bytes").write_text(str(2**63 - 4096))
             self.assertIsNone(host.cgroup_limit_bytes(tmp))
+
+    # PLE table in RAM (QWEN38_PLE_MMAP=0, the default profile)
+
+    def test_ple_in_ram_is_subtracted_from_the_arena(self):
+        want = int((80 * GIB - host.PLE_TABLE_BYTES - 10 * GIB) // host.SLOT_BYTES)
+        self.assertEqual(self.slots(125.7, str(80 * GIB), {"QWEN38_PLE_MMAP": "0"}), want)
+        # QWEN38_PLE_RESIDENT_GIB overrides the table size (here: nothing to subtract)
+        self.assertEqual(self.slots(125.7, str(40 * GIB), {"QWEN38_PLE_MMAP": "0", "QWEN38_PLE_RESIDENT_GIB": "0"}),
+                         int(30 * GIB // host.SLOT_BYTES))
+
+    def test_default_profile_on_128gb_is_fully_ram_resident(self):
+        # 118g compose limit, 64 hot experts: all 21,504 cold experts in RAM next to the PLE table, nothing on disk
+        self.assertEqual(self.check(125.6, str(118 * GIB), PROFILE, hot=64), 48 * 448)
+
+    def test_require_resident_names_the_limit_to_set(self):
+        # The old compose default (54g) cannot hold experts + PLE table: stop with the value to set instead
+        with self.assertRaises(host.PlanError) as ctx:
+            self.check(125.6, str(54 * GIB), PROFILE, hot=64)
+        self.assertIn("COMPOSE_MEMORY_LIMIT=109g", str(ctx.exception))
+
+    def test_require_resident_on_a_too_small_host(self):
+        with self.assertRaises(host.PlanError) as ctx:
+            self.check(62.5, None, PROFILE, hot=64)
+        self.assertIn("too little RAM", str(ctx.exception))
+
+    def test_stream_group_guard_reproduces_the_first_run(self):
+        # 54 GiB limit, 32 hot experts, PLE mmap: 18,633 slots (388 per layer) leave 92 cold experts per layer on
+        # disk, more than one stream group of 80 (stream_v2 would fail after loading the whole checkpoint)
+        env = {"QWEN38_HOT_ONLY": "32", "QWEN38_PLE_MMAP": "1", "QWEN38_STREAM_GROUP": "80"}
+        self.assertEqual(self.slots(125.6, str(54 * GIB), env), 18633)
+        with self.assertRaises(host.PlanError) as ctx:
+            self.check(125.6, str(54 * GIB), env, hot=32)
+        self.assertIn("92 cold experts per layer", str(ctx.exception))
+
+    def test_tail_within_one_group_is_allowed(self):
+        # 56 GiB: 19,480 slots (405 per layer) leave 75 per layer on disk, within a group of 80
+        env = {"QWEN38_HOT_ONLY": "32", "QWEN38_PLE_MMAP": "1", "QWEN38_STREAM_GROUP": "80"}
+        self.assertEqual(self.check(125.6, str(56 * GIB), env, hot=32), 19480)
 
 
 if __name__ == "__main__":

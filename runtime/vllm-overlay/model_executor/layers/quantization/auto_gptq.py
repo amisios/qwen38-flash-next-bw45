@@ -932,6 +932,12 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
     def maybe_init_static_hot_cache(self, layer: RoutedExperts) -> None:
         """Initialize the shared Humming hot cache after UVA offload restoration."""
         if self.wna16_moe_backend != WNA16MoEBackend.HUMMING:
+            # A hot-only layer (QWEN38_HOT_ONLY) owns only its hot experts. Without the Humming path below its cold
+            # experts would never be computed (no CPU pool, no streaming) and the output would be silently wrong.
+            if getattr(getattr(layer, "expert_map_manager", None), "_qwen38_hot_ids", None) is not None:
+                raise RuntimeError(
+                    "hot-only serving needs the Humming MoE backend (--moe-backend humming), but "
+                    f"{getattr(layer, 'layer_name', '') or 'a target MoE layer'} uses {self.wna16_moe_backend}")
             return
 
         # Translate AutoRound's checkpoint names to the generic names used by

@@ -42,7 +42,9 @@ def _cpu_list(spec: str) -> list[int]:
 
 def build_extension(verbose: bool = False):
     """Compile (or load the cached build of) the CPU kernel and the GPU bridge. The image builds it at build time
-    (QWEN38_CPU_EXPERTS_BUILD); x86-64 with AVX2, FMA and F16C; sm_86 code plus PTX for newer GPUs."""
+    (QWEN38_CPU_EXPERTS_BUILD); x86-64 with AVX2, FMA and F16C. GPU code: native sm_120 (Blackwell RTX PRO /
+    RTX 50) and sm_86 (Ampere), plus compute_120 PTX. The -gencode flags are explicit, so TORCH_CUDA_ARCH_LIST
+    does not apply to this extension."""
     from torch.utils.cpp_extension import load
     here = os.path.dirname(os.path.abspath(__file__))
     build = os.environ.get("QWEN38_CPU_EXPERTS_BUILD", "/root/.cache/qwen38/cpu_experts")
@@ -50,7 +52,8 @@ def build_extension(verbose: bool = False):
     return load("qwen38_cpu_experts", [os.path.join(here, "cpu_moe.cpp"), os.path.join(here, "bridge_cuda.cu")],
                 extra_cflags=["-O3", "-mavx2", "-mfma", "-mf16c", "-DPF_ROWS=6", "-DWITH_BRIDGE"],
                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_86,code=sm_86",
-                                   "-gencode=arch=compute_86,code=compute_86"],
+                                   "-gencode=arch=compute_120,code=sm_120",
+                                   "-gencode=arch=compute_120,code=compute_120"],
                 build_directory=build, verbose=verbose)
 
 
