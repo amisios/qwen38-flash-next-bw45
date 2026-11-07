@@ -1,7 +1,22 @@
 #!/usr/bin/env bash
 # Check this host against the default profile (one 32 GB Blackwell GPU, 128 GB RAM, everything RAM-resident) before
-# the first start. Errors stop `make up`. Settings come from the environment (the Makefile exports .env).
+# the first start. Errors stop `make up`. Settings come from the repository's .env (variables already set in the
+# environment win), so `./scripts/preflight.sh` and `make preflight` see the same values.
 set -euo pipefail
+
+load_env() {  # KEY=value lines of a .env file; variables already set in the environment win
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+    key=${BASH_REMATCH[1]}
+    value=${BASH_REMATCH[2]}
+    value=${value%$'\r'}
+    if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then value=${BASH_REMATCH[1]}; fi
+    if [[ -z "${!key+x}" ]]; then export "$key=$value"; fi
+  done < "$1"
+}
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+if [[ -f "$repo_root/.env" ]]; then load_env "$repo_root/.env"; fi
 
 fail=0
 warn() { printf 'WARN:  %s\n' "$*" >&2; }
